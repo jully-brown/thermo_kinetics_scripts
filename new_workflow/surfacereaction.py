@@ -1,6 +1,8 @@
 from adsorbate import Adsorbate, Adsorbates
 import matplotlib.pyplot as plt
-
+import numpy as np
+from scipy import constants
+from scipy.optimize import curve_fit
 
 class SurfaceReaction:
     """
@@ -72,7 +74,32 @@ class SurfaceReaction:
         fit the arrhenious constants accourding to:
             https://cantera.org/3.1/python/kinetics.html#arrheniusrate
         """
-        return A, b, Ea
+        # k(T) = (k_B T / h) * (q_ts / q_is) * exp(-dE / (k_B T))
+        # k(T) = A * T^b * exp(-Ea / (k_B T))
+        # Ea would be eV
+
+        # Boltzmann constant in eV/K
+        kB_eV = constants.physical_constants["Boltzmann constant in eV/K"][0]
+
+        # TST forward rate constant
+        q_ratio = q_ts / q_is
+        #kfwd = (constants.k * temps / constants.h) * q_ratio * np.exp(-dE / (kB_eV * temps))
+        site_area = self.first_order_saddle_point.unit_cell_area
+        N_A = constants.Avogadro
+
+        kfwd = ((constants.k * temps / constants.h) * q_ratio * np.exp(-dE / (kB_eV * temps))) * site_area * N_A
+
+        # Fit ln(k) = ln(A) + b ln(T) - Ea/(kB*T)
+        # b = 0 
+        y = np.log(kfwd)
+        x = 1.0 / temps
+
+        slope, intercept = np.polyfit(x, y, 1)
+        A = np.exp(intercept)
+        b = 0.0
+        Ea_eV = -slope * kB_eV   # eV
+        Ea = Ea_eV * constants.eV * constants.Avogadro / 1000
+        return float(A), float(b), float(Ea)
 
     def plot_arrhenius(self, filename=None):
         """
@@ -81,7 +108,44 @@ class SurfaceReaction:
         please use a log y axis instead of log(k), and please
         use 1000/T for the x axis.
         """
+        #x-axis: 1000 / T
+        #y-axis: k on a log scale
+        
+        temps = self.first_order_saddle_point.temperatures.copy()
+
+        q_is = 1
+        for IS in self.initial_states:
+            qtmp, _, _, _ = IS.get_thermo()
+            q_is *= qtmp
+
+        q_ts, _, _, _ = self.first_order_saddle_point.get_thermo()
+        dE = self.delta_energy
+
+        temps = np.asarray(temps, dtype=float)
+        q_is = np.asarray(q_is, dtype=float)
+        q_ts = np.asarray(q_ts, dtype=float)
+
+        kB_eV = constants.physical_constants["Boltzmann constant in eV/K"][0]
+
+        # raw TST-like rates
+        q_ratio = q_ts / q_is
+        k_raw = (constants.k * temps / constants.h) * q_ratio * np.exp(-dE / (kB_eV * temps))
+
+        # fitted Arrhenius rates
+        A, b, Ea = self._parameterize_arrhenius(temps, q_is, q_ts, dE)
+        k_fit = A * (temps ** b) * np.exp(-Ea / (kB_eV * temps))
+
+        x = 1000.0 / temps
+
+        plt.figure()
+        plt.semilogy(x, k_raw, "o", label="TST")
+        plt.semilogy(x, k_fit, "-", label=f"Fit: A={A:.3e}, b={b:.3f}, Ea={Ea:.3f} eV")
+        plt.xlabel("1000 / T (K$^{-1}$)")
+        plt.ylabel("k")
+        plt.legend()
+        plt.tight_layout()
         plt.subplot()
+
         return
 
     def write_RMG_library_entry(self):
